@@ -82,6 +82,42 @@ print(f"{len(x_test)=} {len(y_test)=}")
 # NEURAL NETWORK #
 ##################
 
+class linear:
+    def __init__(self, n_in, n_out, bias = True):
+        self.n_in = n_in
+        self.n_out = n_out
+        self.bias = bias
+        self.is_training = True
+
+        self.W = torch.randn(n_in, n_out)
+        if bias:
+            self.b = torch.randn(n_out)
+
+    def __call__(self, x):
+        out = x @ self.W
+        if self.bias:
+            out += self.b
+        self.out = out
+        return self.out
+
+    def parameters(self):
+        if self.bias:
+            return [self.W, self.b]
+        else:
+            return [self.W]
+
+class tanh:
+    def __init__(self):
+        pass
+
+    def __call__(self, x):
+        return torch.tanh(x)
+    
+    def parameters(self):
+        return []
+
+
+
 class nn_mlp:
     def __init__(self, n_char_used, n_emb, n_hidden, n_char = 27):
         self.n_char_used = n_char_used
@@ -122,26 +158,55 @@ class nn_mlp:
             loss = F.cross_entropy(logits, y[batch_idx])
             self.backward(loss, lr)
 
-n_emb_values = [6, 8, 10, 12, 14, 16, 18, 20]
-n_hidden_values = [100, 200, 300, 400, 500]
+n_char_used=3
+n_emb=2
+n_hidden=100
+n_epochs=25000
+n_batch=100
+lr=0.1
 
-hyperparams = list(product(n_emb_values, n_hidden_values))
-random.shuffle(hyperparams)
+mlp = nn_mlp(n_char_used=n_char_used, n_emb=n_emb, n_hidden=n_hidden, n_char=n_char)
+mlp.train(x=x_train, y=y_train, n_epochs=n_epochs, n_batch=n_batch, lr=lr)
+logits = mlp.forward(x_train)
+loss = F.cross_entropy(logits, y_train)
+print(loss.item())
 
-print("n_emb;n_hidden;loss_train;loss_valid")
-for h in hyperparams:
 
-    mlp = nn_mlp(n_char_used=n_char_used, n_emb=h[0], n_hidden=h[1], n_char=n_char)
-    mlp.train(x=x_train, y=y_train, n_epochs=50000, n_batch=100, lr=0.1)
-    mlp.train(x=x_train, y=y_train, n_epochs=150000, n_batch=100, lr=0.01)
+C = torch.randn(n_char, n_emb)
+layers = [  linear(n_in=n_char_used*n_emb, n_out=n_hidden), 
+            tanh(),
+            linear(n_in=n_hidden, n_out=n_char)]
 
-    logits_train = mlp.forward(x_train)
-    loss_train = F.cross_entropy(logits_train, y_train)
+parameters = [C]
+for l in layers:
+    parameters += l.parameters()
 
-    logits_valid = mlp.forward(x_valid)
-    loss_valid = F.cross_entropy(logits_valid, y_valid)
+for p in parameters:
+    p.requires_grad_() 
 
-    print(f"{h[0]};{h[1]};{loss_train.item()};{loss_valid.item()}")
+for i in range(n_epochs):
+    batch_idx = torch.randint(0, x_train.shape[0], (n_batch, ))
 
+    # FORWARD
+    x = x_train[batch_idx]
+    x = C[x].view(-1, n_char_used * n_emb)
+    for layer in layers:
+        x = layer(x)
+    loss = F.cross_entropy(x, y_train[batch_idx])
+
+    for p in parameters:
+        p.grad = None
+    loss.backward()
+    for p in parameters:
+        p.data += -lr * p.grad    
+
+x = x_train
+x = C[x].view(-1, n_char_used * n_emb)
+for layer in layers:
+    x = layer(x)
+loss = F.cross_entropy(x, y_train)
+print(loss.item())
+
+    
 
 
