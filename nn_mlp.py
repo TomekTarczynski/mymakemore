@@ -82,16 +82,16 @@ print(f"{len(x_test)=} {len(y_test)=}")
 # NEURAL NETWORK #
 ##################
 
-class linear:
-    def __init__(self, n_in, n_out, bias = True):
-        self.n_in = n_in
-        self.n_out = n_out
+class Linear:
+    def __init__(self, in_features, out_features, bias = True):
+        self.n_in = in_features
+        self.n_out = out_features
         self.bias = bias
         self.is_training = True
 
-        self.W = torch.randn(n_in, n_out)
+        self.W = (torch.rand(in_features, out_features) * 2 - 1) / (in_features**0.5)
         if bias:
-            self.b = torch.randn(n_out)
+            self.b = torch.zeros(out_features)
 
     def __call__(self, x):
         out = x @ self.W
@@ -106,7 +106,39 @@ class linear:
         else:
             return [self.W]
 
-class tanh:
+class BatchNorm1d:
+    def __init__(self,num_features, eps=1e-05, momentum=0.1, track_running_stats=True):
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.track_running_stats = track_running_stats
+        self.is_training = True
+
+        self.gamma = torch.ones((1, self.num_features))
+        self.beta = torch.zeros((1, self.num_features))
+
+        if self.track_running_stats:
+            self.run_mean = torch.zeros((1, self.num_features))
+            self.run_var = torch.ones((1, self.num_features))
+
+    def __call__(self, x):
+        if self.is_training:
+            batch_mean = torch.mean(input=x, dim=0, keepdim=True)
+            batch_var = torch.var(input=x, dim=0, keepdim=True)
+            x = self.gamma * (x - batch_mean) / torch.sqrt(batch_var + self.eps) + self.beta
+
+            if self.track_running_stats:
+                with torch.no_grad():
+                    self.run_mean = self.run_mean * (1 - self.momentum) + self.momentum * batch_mean
+                    self.run_var = self.run_var * (1 - self.momentum) + self.momentum * batch_var
+        else:
+            x = self.gamma * (x - self.run_mean) / (self.run_var + self.eps) **0.5 + self.beta
+        return x
+
+    def parameters(self):
+        return [self.gamma, self.beta]
+
+class Tanh:
     def __init__(self):
         pass
 
@@ -158,12 +190,16 @@ class nn_mlp:
             loss = F.cross_entropy(logits, y[batch_idx])
             self.backward(loss, lr)
 
+### SETTINGS ###
+
 n_char_used=3
 n_emb=2
 n_hidden=100
-n_epochs=25000
+n_epochs=250000
 n_batch=100
 lr=0.1
+
+### MY MLP CLASS ###
 
 mlp = nn_mlp(n_char_used=n_char_used, n_emb=n_emb, n_hidden=n_hidden, n_char=n_char)
 mlp.train(x=x_train, y=y_train, n_epochs=n_epochs, n_batch=n_batch, lr=lr)
@@ -171,11 +207,14 @@ logits = mlp.forward(x_train)
 loss = F.cross_entropy(logits, y_train)
 print(loss.item())
 
+### MY LAYERS CLASS ###
 
 C = torch.randn(n_char, n_emb)
-layers = [  linear(n_in=n_char_used*n_emb, n_out=n_hidden), 
-            tanh(),
-            linear(n_in=n_hidden, n_out=n_char)]
+layers = [  Linear(in_features=n_char_used*n_emb, out_features=n_hidden), 
+            BatchNorm1d(num_features=n_hidden, momentum=0.001),
+            Tanh(),
+            Linear(in_features=n_hidden, out_features=n_char),
+            BatchNorm1d(num_features=n_char, momentum=0.001)]
 
 parameters = [C]
 for l in layers:
@@ -207,6 +246,41 @@ for layer in layers:
 loss = F.cross_entropy(x, y_train)
 print(loss.item())
 
-    
+### TORCH LAYER CLASS ###
 
+C = torch.randn(n_char, n_emb)
+layers = [  torch.nn.Linear(in_features=n_char_used*n_emb, out_features=n_hidden), 
+            torch.nn.BatchNorm1d(num_features=n_hidden, momentum=0.001),
+            torch.nn.Tanh(),
+            torch.nn.Linear(in_features=n_hidden, out_features=n_char),
+            torch.nn.BatchNorm1d(num_features=n_char, momentum=0.001)]
 
+parameters = [C]
+for l in layers:
+    parameters += l.parameters()
+
+for p in parameters:
+    p.requires_grad_() 
+
+for i in range(n_epochs):
+    batch_idx = torch.randint(0, x_train.shape[0], (n_batch, ))
+
+    # FORWARD
+    x = x_train[batch_idx]
+    x = C[x].view(-1, n_char_used * n_emb)
+    for layer in layers:
+        x = layer(x)
+    loss = F.cross_entropy(x, y_train[batch_idx])
+
+    for p in parameters:
+        p.grad = None
+    loss.backward()
+    for p in parameters:
+        p.data += -lr * p.grad    
+
+x = x_train
+x = C[x].view(-1, n_char_used * n_emb)
+for layer in layers:
+    x = layer(x)
+loss = F.cross_entropy(x, y_train)
+print(loss.item())
