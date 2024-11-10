@@ -12,10 +12,12 @@ input_file = "names.txt"
 pct_train = 0.8
 pct_valid = 0.1
 
-n_char_used = 3
-n_emb = 10
-n_hidden = 200
-n_batch = 100
+n_char_used=3
+n_emb=2
+n_hidden=100
+n_epochs=10000
+n_batch=100
+lr=0.1
 
 ##############
 # READ INPUT #
@@ -138,6 +140,30 @@ class BatchNorm1d:
     def parameters(self):
         return [self.gamma, self.beta]
 
+class Embedding:
+    def __init__(self, num_embeddings, embedding_dim):
+        self.num_embeddings=num_embeddings
+        self.embedding_dim=embedding_dim
+        self.W = (torch.rand(self.num_embeddings, self.embedding_dim) * 2 - 1)
+
+    def __call__(self, x):
+        self.out = self.W[x]
+        return self.out
+
+    def parameters(self):
+        return [self.W]
+
+class FlattenConsecutive:
+    def __init__(self):
+        pass
+
+    def __call__(self, x):
+        self.out = x.view(x.shape[0], -1)
+        return self.out
+
+    def parameters(self):
+        return []
+
 class Tanh:
     def __init__(self):
         pass
@@ -148,107 +174,56 @@ class Tanh:
     def parameters(self):
         return []
 
+class Sequential:
+    def __init__(self, layers):
+        self.layers = layers
 
+        for p in self.parameters():
+            p.requires_grad_() 
 
-class nn_mlp:
-    def __init__(self, n_char_used, n_emb, n_hidden, n_char = 27):
-        self.n_char_used = n_char_used
-        self.n_emb = n_emb
-        self.n_hidden = n_hidden
-        self.n_char = n_char
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        self.out = x
+        return self.out
 
-        self.C = torch.randn(self.n_char, self.n_emb)
-        self.W1 = torch.randn(self.n_char_used * self.n_emb, self.n_hidden)
-        self.b1 = torch.randn(self.n_hidden)
-        self.W2 = torch.randn(self.n_hidden, self.n_char)
-        self.b2 = torch.randn(self.n_char)
-
-        self.parameters = [self.C, self.W1, self.b1, self.W2, self.b2]
-        for p in self.parameters:
-            p.requires_grad = True
-
-    def forward(self, x):
-        emb = self.C[x]
-        emb = emb.view(-1, self.n_char_used * self.n_emb)
-        h = torch.tanh(emb @ self.W1 + self.b1)
-        logits = h @ self.W2 + self.b2
-        return logits
-
-    def backward(self, loss, lr):
-        for p in self.parameters:
-            p.grad = None
-        loss.backward()
-        for p in self.parameters:
-            p.data += -lr * p.grad
-
-    def train(self, x, y, n_epochs, n_batch, lr):
-        for i in range(n_epochs):
-            batch_idx = torch.randint(0, x.shape[0], (n_batch, ))
-   
-            # FORWARD
-            logits = self.forward(x[batch_idx])
-            loss = F.cross_entropy(logits, y[batch_idx])
-            self.backward(loss, lr)
-
-### SETTINGS ###
-
-n_char_used=3
-n_emb=2
-n_hidden=100
-n_epochs=250000
-n_batch=100
-lr=0.1
-
-### MY MLP CLASS ###
-
-mlp = nn_mlp(n_char_used=n_char_used, n_emb=n_emb, n_hidden=n_hidden, n_char=n_char)
-mlp.train(x=x_train, y=y_train, n_epochs=n_epochs, n_batch=n_batch, lr=lr)
-logits = mlp.forward(x_train)
-loss = F.cross_entropy(logits, y_train)
-print(loss.item())
+    def parameters(self):
+        parameters = []
+        for l in self.layers:
+            parameters += l.parameters()
+        return parameters
 
 ### MY LAYERS CLASS ###
 
-C = torch.randn(n_char, n_emb)
-layers = [  Linear(in_features=n_char_used*n_emb, out_features=n_hidden), 
-            BatchNorm1d(num_features=n_hidden, momentum=0.001),
-            Tanh(),
-            Linear(in_features=n_hidden, out_features=n_char),
-            BatchNorm1d(num_features=n_char, momentum=0.001)]
-
-parameters = [C]
-for l in layers:
-    parameters += l.parameters()
-
-for p in parameters:
-    p.requires_grad_() 
+model = Sequential(
+            [   Embedding(num_embeddings=n_char, embedding_dim=n_emb),
+                FlattenConsecutive(),
+                Linear(in_features=n_char_used*n_emb, out_features=n_hidden), 
+                BatchNorm1d(num_features=n_hidden, momentum=0.001),
+                Tanh(),
+                Linear(in_features=n_hidden, out_features=n_char),
+                BatchNorm1d(num_features=n_char, momentum=0.001)])
 
 for i in range(n_epochs):
     batch_idx = torch.randint(0, x_train.shape[0], (n_batch, ))
 
     # FORWARD
-    x = x_train[batch_idx]
-    x = C[x].view(-1, n_char_used * n_emb)
-    for layer in layers:
-        x = layer(x)
-    loss = F.cross_entropy(x, y_train[batch_idx])
+    logits = model(x_train[batch_idx])
+    loss = F.cross_entropy(logits, y_train[batch_idx])
 
-    for p in parameters:
+    for p in model.parameters():
         p.grad = None
     loss.backward()
-    for p in parameters:
+    for p in model.parameters():
         p.data += -lr * p.grad    
 
-x = x_train
-x = C[x].view(-1, n_char_used * n_emb)
-for layer in layers:
-    x = layer(x)
-loss = F.cross_entropy(x, y_train)
+logits = model(x_train)
+loss = F.cross_entropy(logits, y_train)
 print(loss.item())
 
 ### TORCH LAYER CLASS ###
 
-C = torch.randn(n_char, n_emb)
+""" C = torch.randn(n_char, n_emb)
 layers = [  torch.nn.Linear(in_features=n_char_used*n_emb, out_features=n_hidden), 
             torch.nn.BatchNorm1d(num_features=n_hidden, momentum=0.001),
             torch.nn.Tanh(),
@@ -275,6 +250,10 @@ for i in range(n_epochs):
     for p in parameters:
         p.grad = None
     loss.backward()
+    if i>100000:
+        lr=0.01
+    else:
+        lr = 0.1
     for p in parameters:
         p.data += -lr * p.grad    
 
@@ -284,3 +263,11 @@ for layer in layers:
     x = layer(x)
 loss = F.cross_entropy(x, y_train)
 print(loss.item())
+
+x = x_valid
+x = C[x].view(-1, n_char_used * n_emb)
+for layer in layers:
+    x = layer(x)
+loss = F.cross_entropy(x, y_valid)
+print(loss.item())
+ """
