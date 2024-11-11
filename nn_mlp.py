@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import random
 import matplotlib.pyplot as plt
 from itertools import product
+import time
 
 ############
 # SETTINGS #
@@ -12,12 +13,16 @@ input_file = "names.txt"
 pct_train = 0.8
 pct_valid = 0.1
 
-n_char_used=3
-n_emb=2
-n_hidden=100
-n_epochs=10000
-n_batch=100
+n_char_used=8
+n_emb=10
+n_hidden=128
+n_epochs=500
+n_batch=5000
 lr=0.1
+
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = "cpu"
+device = "cuda"
 
 ##############
 # READ INPUT #
@@ -71,7 +76,7 @@ def preprocess_data(data):
             xs.append(context)
             ys.append(c)
             context = context[1:] + [c]
-    return torch.tensor(xs), torch.tensor(ys)
+    return torch.tensor(xs, device=device), torch.tensor(ys, device=device)
        
 x_train, y_train = preprocess_data(data_train)
 x_valid, y_valid = preprocess_data(data_valid)
@@ -91,9 +96,9 @@ class Linear:
         self.bias = bias
         self.is_training = True
 
-        self.W = (torch.rand(in_features, out_features) * 2 - 1) / (in_features**0.5)
+        self.W = (torch.rand(in_features, out_features, device=device) * 2 - 1) / (in_features**0.5)
         if bias:
-            self.b = torch.zeros(out_features)
+            self.b = torch.zeros(out_features, device=device)
 
     def __call__(self, x):
         out = x @ self.W
@@ -116,26 +121,30 @@ class BatchNorm1d:
         self.track_running_stats = track_running_stats
         self.is_training = True
 
-        self.gamma = torch.ones((1, self.num_features))
-        self.beta = torch.zeros((1, self.num_features))
+        self.gamma = torch.ones((1, self.num_features), device=device)
+        self.beta = torch.zeros((1, self.num_features), device=device)
 
         if self.track_running_stats:
-            self.run_mean = torch.zeros((1, self.num_features))
-            self.run_var = torch.ones((1, self.num_features))
+            self.run_mean = torch.zeros((1, self.num_features), device=device)
+            self.run_var = torch.ones((1, self.num_features), device=device)
 
     def __call__(self, x):
         if self.is_training:
-            batch_mean = torch.mean(input=x, dim=0, keepdim=True)
-            batch_var = torch.var(input=x, dim=0, keepdim=True)
-            x = self.gamma * (x - batch_mean) / torch.sqrt(batch_var + self.eps) + self.beta
+            if x.ndim==2:
+                dim=0
+            elif x.ndim==3:
+                dim=(0,1)
+            batch_mean = torch.mean(input=x, dim=dim, keepdim=True)
+            batch_var = torch.var(input=x, dim=dim, keepdim=True)
+            self.out = self.gamma * (x - batch_mean) / torch.sqrt(batch_var + self.eps) + self.beta
 
             if self.track_running_stats:
                 with torch.no_grad():
                     self.run_mean = self.run_mean * (1 - self.momentum) + self.momentum * batch_mean
                     self.run_var = self.run_var * (1 - self.momentum) + self.momentum * batch_var
         else:
-            x = self.gamma * (x - self.run_mean) / (self.run_var + self.eps) **0.5 + self.beta
-        return x
+            self.out = self.gamma * (x - self.run_mean) / (self.run_var + self.eps) **0.5 + self.beta
+        return self.out
 
     def parameters(self):
         return [self.gamma, self.beta]
@@ -144,7 +153,7 @@ class Embedding:
     def __init__(self, num_embeddings, embedding_dim):
         self.num_embeddings=num_embeddings
         self.embedding_dim=embedding_dim
-        self.W = (torch.rand(self.num_embeddings, self.embedding_dim) * 2 - 1)
+        self.W = (torch.rand(self.num_embeddings, self.embedding_dim, device=device) * 2 - 1)
 
     def __call__(self, x):
         self.out = self.W[x]
@@ -154,11 +163,13 @@ class Embedding:
         return [self.W]
 
 class FlattenConsecutive:
-    def __init__(self):
-        pass
+    def __init__(self, n_flatten=2):
+        self.n_flatten=n_flatten
 
     def __call__(self, x):
-        self.out = x.view(x.shape[0], -1)
+        self.out = x.view(x.shape[0], x.shape[1]//self.n_flatten, x.shape[2]*self.n_flatten)
+        if self.out.shape[1]==1:
+            self.out=self.out.squeeze()
         return self.out
 
     def parameters(self):
@@ -169,7 +180,8 @@ class Tanh:
         pass
 
     def __call__(self, x):
-        return torch.tanh(x)
+        self.out = torch.tanh(x)
+        return self.out
     
     def parameters(self):
         return []
@@ -197,15 +209,28 @@ class Sequential:
 
 model = Sequential(
             [   Embedding(num_embeddings=n_char, embedding_dim=n_emb),
+                
                 FlattenConsecutive(),
-                Linear(in_features=n_char_used*n_emb, out_features=n_hidden), 
+                Linear(in_features=n_emb*2, out_features=n_hidden), 
                 BatchNorm1d(num_features=n_hidden, momentum=0.001),
                 Tanh(),
+
+                FlattenConsecutive(),
+                Linear(in_features=n_hidden*2, out_features=n_hidden), 
+                BatchNorm1d(num_features=n_hidden, momentum=0.001),
+                Tanh(),
+
+                FlattenConsecutive(),
+                Linear(in_features=n_hidden*2, out_features=n_hidden), 
+                BatchNorm1d(num_features=n_hidden, momentum=0.001),
+                Tanh(),
+             
                 Linear(in_features=n_hidden, out_features=n_char),
                 BatchNorm1d(num_features=n_char, momentum=0.001)])
 
+start_time = time.time()
 for i in range(n_epochs):
-    batch_idx = torch.randint(0, x_train.shape[0], (n_batch, ))
+    batch_idx = torch.randint(0, x_train.shape[0], (n_batch, ), device=device)
 
     # FORWARD
     logits = model(x_train[batch_idx])
@@ -215,59 +240,16 @@ for i in range(n_epochs):
         p.grad = None
     loss.backward()
     for p in model.parameters():
-        p.data += -lr * p.grad    
+        p.data += -lr * p.grad
+end_time = time.time()        
+print("Computation time:", end_time - start_time, "seconds")
 
-logits = model(x_train)
-loss = F.cross_entropy(logits, y_train)
-print(loss.item())
+logits_train = model(x_train)
+loss_train = F.cross_entropy(logits_train, y_train)
 
-### TORCH LAYER CLASS ###
+logits_valid = model(x_valid)
+loss_valid = F.cross_entropy(logits_valid, y_valid)
+print(f"{loss_train.item()=} {loss_valid.item()=}")
 
-""" C = torch.randn(n_char, n_emb)
-layers = [  torch.nn.Linear(in_features=n_char_used*n_emb, out_features=n_hidden), 
-            torch.nn.BatchNorm1d(num_features=n_hidden, momentum=0.001),
-            torch.nn.Tanh(),
-            torch.nn.Linear(in_features=n_hidden, out_features=n_char),
-            torch.nn.BatchNorm1d(num_features=n_char, momentum=0.001)]
-
-parameters = [C]
-for l in layers:
-    parameters += l.parameters()
-
-for p in parameters:
-    p.requires_grad_() 
-
-for i in range(n_epochs):
-    batch_idx = torch.randint(0, x_train.shape[0], (n_batch, ))
-
-    # FORWARD
-    x = x_train[batch_idx]
-    x = C[x].view(-1, n_char_used * n_emb)
-    for layer in layers:
-        x = layer(x)
-    loss = F.cross_entropy(x, y_train[batch_idx])
-
-    for p in parameters:
-        p.grad = None
-    loss.backward()
-    if i>100000:
-        lr=0.01
-    else:
-        lr = 0.1
-    for p in parameters:
-        p.data += -lr * p.grad    
-
-x = x_train
-x = C[x].view(-1, n_char_used * n_emb)
-for layer in layers:
-    x = layer(x)
-loss = F.cross_entropy(x, y_train)
-print(loss.item())
-
-x = x_valid
-x = C[x].view(-1, n_char_used * n_emb)
-for layer in layers:
-    x = layer(x)
-loss = F.cross_entropy(x, y_valid)
-print(loss.item())
- """
+for l in model.layers:
+    print(f"{l.__class__} {l.out.shape}")
